@@ -287,7 +287,30 @@ export async function getStatistics(userId, params = {}) {
     }));
 
     const totalSpending = expenseTxs.reduce((sum, t) => sum + t.amount, 0);
-    const totalIncome = incomeTxs.reduce((sum, t) => sum + t.amount, 0);
+
+    // Filter income transactions for statistics summary to exclude internal transfers 
+    // such as Savings withdrawals and same-month Debt settlements.
+    const debtIds = incomeTxs.filter(i => i.debtId).map(i => i.debtId);
+    const relatedDebts = await Debt.find({ _id: { $in: debtIds } }).lean();
+    const debtMap = Object.fromEntries(relatedDebts.map(d => [d._id.toString(), d]));
+
+    let totalIncome = 0;
+    incomeTxs.forEach(tx => {
+        // For Debt settlements, only count those where the debt was created before the current period (simplified)
+        if (tx.category === 'Debt settlement' && tx.debtId) {
+            const debt = debtMap[tx.debtId.toString()];
+            if (debt) {
+                const txDate = new Date(tx.date);
+                const debtDate = new Date(debt.date);
+                // Exclude if debt was created in the same month as this settlement 
+                // (this avoids double counting if money was lent and returned in the same period)
+                if (debtDate.getMonth() === txDate.getMonth() && debtDate.getFullYear() === txDate.getFullYear()) {
+                    return;
+                }
+            }
+        }
+        totalIncome += tx.amount;
+    });
 
     // --- Area data (last 6 months, always from ALL data) ---
     const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
