@@ -177,7 +177,7 @@ export async function getDashboardStats(userId) {
     const debtMap = Object.fromEntries(relatedDebts.map(d => [d._id.toString(), d]));
 
     let displayIncome = 0;
-    let balanceOnlyIncome = 0;
+    let sameMonthRepaymentReduction = 0;
 
     incomeDocs.forEach(tx => {
         if (tx.category === 'Debt settlement' && tx.debtId) {
@@ -187,7 +187,8 @@ export async function getDashboardStats(userId) {
                 const isDebtFromCurrentMonth = debtDate.getFullYear() === now.getFullYear() && debtDate.getMonth() === now.getMonth();
                 
                 if (isDebtFromCurrentMonth) {
-                    balanceOnlyIncome += tx.amount;
+                    // Subtract from expenses instead of adding to income
+                    sameMonthRepaymentReduction += tx.amount;
                 } else {
                     displayIncome += tx.amount;
                 }
@@ -199,7 +200,8 @@ export async function getDashboardStats(userId) {
         }
     });
 
-    const totalExpenses = expenseDocs.reduce((sum, t) => sum + t.amount, 0);
+    const baseTotalExpenses = expenseDocs.reduce((sum, t) => sum + t.amount, 0);
+    const adjustedTotalExpenses = baseTotalExpenses - sameMonthRepaymentReduction;
 
     // Daily activity (for the chart)
     const daysInMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
@@ -210,7 +212,21 @@ export async function getDashboardStats(userId) {
 
     incomeDocs.forEach(tx => {
         const day = new Date(tx.date).getDate().toString();
-        if (dailyMap[day]) dailyMap[day].income += tx.amount;
+        if (dailyMap[day]) {
+            if (tx.category === 'Debt settlement' && tx.debtId) {
+                const debt = debtMap[tx.debtId.toString()];
+                if (debt) {
+                    const debtDate = new Date(debt.date);
+                    const isDebtFromCurrentMonth = debtDate.getFullYear() === now.getFullYear() && debtDate.getMonth() === now.getMonth();
+                    if (isDebtFromCurrentMonth) {
+                        // Subtract this income from the expense bar for this day
+                        dailyMap[day].expense -= tx.amount;
+                        return;
+                    }
+                }
+            }
+            dailyMap[day].income += tx.amount;
+        }
     });
     expenseDocs.forEach(tx => {
         const day = new Date(tx.date).getDate().toString();
@@ -226,9 +242,9 @@ export async function getDashboardStats(userId) {
     const historicalSavingsData = await getSavings(userId);
 
     return {
-        totalBalance: displayIncome + balanceOnlyIncome - totalExpenses,
+        totalBalance: displayIncome - adjustedTotalExpenses,
         totalIncome: displayIncome,
-        totalExpenses,
+        totalExpenses: adjustedTotalExpenses,
         totalSavings: historicalSavingsData.totalSavings,
         dailyExpenses,
     };
@@ -286,31 +302,34 @@ export async function getStatistics(userId, params = {}) {
         name, value, color: categoryColors[name] || '#94A3B8',
     }));
 
-    const totalSpending = expenseTxs.reduce((sum, t) => sum + t.amount, 0);
+    const baseTotalSpending = expenseTxs.reduce((sum, t) => sum + t.amount, 0);
 
     // Filter income transactions for statistics summary to exclude internal transfers 
     // such as Savings withdrawals and same-month Debt settlements.
     const debtIds = incomeTxs.filter(i => i.debtId).map(i => i.debtId);
     const relatedDebts = await Debt.find({ _id: { $in: debtIds } }).lean();
     const debtMap = Object.fromEntries(relatedDebts.map(d => [d._id.toString(), d]));
+ 
+    let sameMonthRepaymentReduction = 0;
+    let displayIncome = 0;
 
-    let totalIncome = 0;
     incomeTxs.forEach(tx => {
-        // For Debt settlements, only count those where the debt was created before the current period (simplified)
         if (tx.category === 'Debt settlement' && tx.debtId) {
             const debt = debtMap[tx.debtId.toString()];
             if (debt) {
                 const txDate = new Date(tx.date);
                 const debtDate = new Date(debt.date);
                 // Exclude if debt was created in the same month as this settlement 
-                // (this avoids double counting if money was lent and returned in the same period)
                 if (debtDate.getMonth() === txDate.getMonth() && debtDate.getFullYear() === txDate.getFullYear()) {
+                    sameMonthRepaymentReduction += tx.amount;
                     return;
                 }
             }
         }
-        totalIncome += tx.amount;
+        displayIncome += tx.amount;
     });
+
+    const adjustedTotalSpending = baseTotalSpending - sameMonthRepaymentReduction;
 
     // --- Area data (last 6 months, always from ALL data) ---
     const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
@@ -346,6 +365,17 @@ export async function getStatistics(userId, params = {}) {
             const m = new Date(tx.date).getMonth();
             const monthName = monthNames[m];
             if (!monthlyMap[monthName]) monthlyMap[monthName] = { income: 0, expense: 0 };
+            if (tx.category === 'Debt settlement' && tx.debtId) {
+                const debt = debtMap[tx.debtId.toString()];
+                if (debt) {
+                    const txDate = new Date(tx.date);
+                    const debtDate = new Date(debt.date);
+                    if (debtDate.getMonth() === txDate.getMonth() && debtDate.getFullYear() === txDate.getFullYear()) {
+                        monthlyMap[monthName].expense -= tx.amount;
+                        return;
+                    }
+                }
+            }
             if (tx.type === 'income') monthlyMap[monthName].income += tx.amount;
             else monthlyMap[monthName].expense += tx.amount;
         });
@@ -370,6 +400,17 @@ export async function getStatistics(userId, params = {}) {
         allFiltered.forEach(tx => {
             const day = new Date(tx.date).getDate().toString();
             if (dailyMap[day]) {
+                if (tx.category === 'Debt settlement' && tx.debtId) {
+                    const debt = debtMap[tx.debtId.toString()];
+                    if (debt) {
+                        const txDate = new Date(tx.date);
+                        const debtDate = new Date(debt.date);
+                        if (debtDate.getMonth() === txDate.getMonth() && debtDate.getFullYear() === txDate.getFullYear()) {
+                            dailyMap[day].expense -= tx.amount;
+                            return;
+                        }
+                    }
+                }
                 if (tx.type === 'income') dailyMap[day].income += tx.amount;
                 else dailyMap[day].expense += tx.amount;
             }
@@ -386,9 +427,9 @@ export async function getStatistics(userId, params = {}) {
     return {
         pieData,
         areaData,
-        totalSpending,
-        totalExpenses: totalSpending,
-        totalIncome,
+        totalSpending: adjustedTotalSpending,
+        totalExpenses: adjustedTotalSpending,
+        totalIncome: displayIncome,
         dailyExpenses,
     };
 }
