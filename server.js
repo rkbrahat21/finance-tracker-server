@@ -101,17 +101,22 @@ async function handleRequest(req, res) {
     }
 
     try {
-        // ---------- Auth Routes (Public) ----------
-        if (pathname === '/api/auth/register' && method === 'POST') {
-            const body = await parseBody(req);
-            const result = await registerUser(body);
-            return sendJSON(res, 201, result);
-        }
+        // Normalize pathname: remove trailing slash and double slashes
+        const normalizedPath = pathname.replace(/\/+$/, '') || '/';
+        
+        console.log(`[${method}] ${normalizedPath}`);
 
-        if (pathname === '/api/auth/login' && method === 'POST') {
+        // ---------- Auth Routes (Public) ----------
+        // Allow both with and without /api prefix for flexibility during deployment
+        const isAuthRoute = 
+            normalizedPath === '/api/auth/register' || normalizedPath === '/auth/register' ||
+            normalizedPath === '/api/auth/login' || normalizedPath === '/auth/login';
+
+        if (isAuthRoute && method === 'POST') {
             const body = await parseBody(req);
-            const result = await loginUser(body);
-            return sendJSON(res, 200, result);
+            const isLogin = normalizedPath.includes('login');
+            const result = isLogin ? await loginUser(body) : await registerUser(body);
+            return sendJSON(res, isLogin ? 200 : 201, result);
         }
 
         // ---------- Protected Routes ----------
